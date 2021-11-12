@@ -699,14 +699,16 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
 
     _handler_names = get_symbol_names(globals(), 'MSG_')
 
-    next_conn = 0    # Next connection number, for logging
+    # next_conn = 0    # Next connection number, for logging
+    next_conn = int(round(time.time() * 1000))
 
     @staticmethod
     def _get_next_conn() -> int:
         """Return the next available connection number (for logging)"""
 
         next_conn = SSHConnection.next_conn
-        SSHConnection.next_conn += 1
+        # SSHConnection.next_conn += 1
+        SSHConnection.next_conn = int(round(time.time() * 1000))
         return next_conn
 
     def __init__(self, loop: asyncio.AbstractEventLoop,
