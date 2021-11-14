@@ -5537,7 +5537,14 @@ class SSHServerConnection(SSHConnection):
     async def _finish_path_forward(self, listen_path: str) -> None:
         """Finish processing a UNIX domain socket forwarding request"""
 
-        listener = self._owner.unix_server_requested(listen_path)
+        listen_path_override = False
+        listener = False
+        try:
+            listener, listen_path_override = self._owner.unix_server_requested(listen_path)
+            self.logger.debug1('UNIX listener path override: %s', listen_path_override)
+            listen_path = listen_path_override
+        except TypeError:
+            listener = self._owner.unix_server_requested(listen_path)
 
         try:
             if inspect.isawaitable(listener):
