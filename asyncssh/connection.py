@@ -900,7 +900,11 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
             chan.process_connection_close(exc)
 
         for listener in list(self._local_listeners.values()):
-            listener.close()
+            # cython compiled code does not store object
+            try:
+                listener.close()
+            except AttributeError:
+                pass
 
         while self._global_request_waiters:
             self._process_global_response(MSG_REQUEST_FAILURE, 0,
