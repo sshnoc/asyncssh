@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2013-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -151,7 +151,8 @@ from .session import SSHTCPSession, SSHUNIXSession
 from .session import SSHClientSessionFactory, SSHTCPSessionFactory
 from .session import SSHUNIXSessionFactory
 
-from .sftp import SFTPClient, SFTPServer, start_sftp_client
+from .sftp import MIN_SFTP_VERSION, SFTPClient, SFTPServer
+from .sftp import start_sftp_client
 
 from .stream import SSHReader, SSHWriter, SFTPServerFactory
 from .stream import SSHSocketSessionFactory, SSHServerSessionFactory
@@ -390,44 +391,52 @@ async def _connect(options: 'SSHConnectionOptions',
     proxy_command = options.proxy_command
     free_conn = True
 
+    options.waiter = loop.create_future()
+
     new_tunnel = await _open_tunnel(tunnel, options.passphrase)
     tunnel: _TunnelConnectorProtocol
 
-    if new_tunnel:
-        new_tunnel.logger.info('%s %s via %s', msg, (host, port), tunnel)
+    try:
+        if new_tunnel:
+            new_tunnel.logger.info('%s %s via %s', msg, (host, port), tunnel)
 
-        # pylint: disable=broad-except
-        try:
-            _, tunnel_session = await new_tunnel.create_connection(
-                cast(SSHTCPSessionFactory[bytes], conn_factory), host, port)
-        except Exception:
-            new_tunnel.close()
-            await new_tunnel.wait_closed()
-            raise
-        else:
+            # pylint: disable=broad-except
+            try:
+                _, tunnel_session = await new_tunnel.create_connection(
+                    cast(SSHTCPSessionFactory[bytes], conn_factory),
+                    host, port)
+            except Exception:
+                new_tunnel.close()
+                await new_tunnel.wait_closed()
+                raise
+            else:
+                conn = cast(_Conn, tunnel_session)
+                conn.set_tunnel(new_tunnel)
+        elif tunnel:
+            tunnel_logger = getattr(tunnel, 'logger', logger)
+            tunnel_logger.info('%s %s via SSH tunnel', msg, (host, port))
+
+            _, tunnel_session = await tunnel.create_connection(
+                cast(SSHTCPSessionFactory[bytes], conn_factory),
+                host, port)
+
             conn = cast(_Conn, tunnel_session)
-            conn.set_tunnel(new_tunnel)
-    elif tunnel:
-        tunnel_logger = getattr(tunnel, 'logger', logger)
-        tunnel_logger.info('%s %s via SSH tunnel', msg, (host, port))
+        elif proxy_command:
+            conn = await _open_proxy(loop, proxy_command, conn_factory)
+        else:
+            logger.info('%s %s', msg, (host, port))
 
-        _, tunnel_session = await tunnel.create_connection(
-                cast(SSHTCPSessionFactory[bytes], conn_factory), host, port)
+            _, session = await loop.create_connection(
+                conn_factory, host, port, family=family,
+                flags=flags, local_addr=local_addr)
 
-        conn = cast(_Conn, tunnel_session)
-    elif proxy_command:
-        conn = await _open_proxy(loop, proxy_command, conn_factory)
-    else:
-        logger.info('%s %s', msg, (host, port))
-
-        _, session = await loop.create_connection(
-            conn_factory, host, port, family=family,
-            flags=flags, local_addr=local_addr)
-
-        conn = cast(_Conn, session)
+            conn = cast(_Conn, session)
+    except asyncio.CancelledError:
+        options.waiter.cancel()
+        raise
 
     try:
-        await conn.wait_established()
+        await options.waiter
         free_conn = False
 
         if new_tunnel:
@@ -722,7 +731,7 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         self._error_handler = error_handler
         self._server = server
         self._wait = wait
-        self._waiter = loop.create_future()
+        self._waiter = options.waiter if wait else None
 
         self._transport: Optional[asyncio.Transport] = None
         self._local_addr = ''
@@ -919,7 +928,7 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
             self._acceptor = None
             self._error_handler = None
 
-        if self._wait and not self._waiter.cancelled():
+        if self._wait and self._waiter and not self._waiter.cancelled():
             if exc:
                 self._waiter.set_exception(exc)
             else: # pragma: no cover
@@ -1737,7 +1746,8 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
                 recv_compression=self._cmp_alg_sc.decode('ascii'))
 
             if first_kex:
-                if self._wait == 'kex' and not self._waiter.cancelled():
+                if self._wait == 'kex' and self._waiter and \
+                        not self._waiter.cancelled():
                     self._waiter.set_result(None)
                     self._wait = None
                 else:
@@ -1871,7 +1881,8 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
             self._acceptor = None
             self._error_handler = None
 
-        if self._wait == 'auth' and not self._waiter.cancelled():
+        if self._wait == 'auth' and self._waiter and \
+                not self._waiter.cancelled():
             self._waiter.set_result(None)
             self._wait = None
 
@@ -2320,7 +2331,8 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
                 self._acceptor = None
                 self._error_handler = None
 
-            if self._wait == 'auth' and not self._waiter.cancelled():
+            if self._wait == 'auth' and self._waiter and \
+                    not self._waiter.cancelled():
                 self._waiter.set_result(None)
                 self._wait = None
         else:
@@ -2521,11 +2533,6 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         self.logger.info('Closing connection')
 
         self.disconnect(DISC_BY_APPLICATION, 'Disconnected by application')
-
-    async def wait_established(self) -> None:
-        """Wait for connection to be established"""
-
-        await self._waiter
 
     async def wait_closed(self) -> None:
         """Wait for this connection to close
@@ -4708,7 +4715,8 @@ class SSHClientConnection(SSHConnection):
     async def start_sftp_client(self, env: DefTuple[_Env] = (),
                                 send_env: DefTuple[_SendEnv] = (),
                                 path_encoding: Optional[str] = 'utf-8',
-                                path_errors: str = 'strict') -> SFTPClient:
+                                path_errors = 'strict',
+                                sftp_version = MIN_SFTP_VERSION) -> SFTPClient:
         """Start an SFTP client
 
            This method is a coroutine which attempts to start a secure
@@ -4744,10 +4752,14 @@ class SSHClientConnection(SSHConnection):
                remote pathnames
            :param path_errors:
                The error handling strategy to apply on encode/decode errors
+           :param sftp_version: (optional)
+               The maximum version of the SFTP protocol to support, currently
+               either 3 or 4, defaulting to 3.
            :type env: `dict` with `str` keys and values
            :type send_env: `list` of `str`
            :type path_encoding: `str`
            :type path_errors: `str`
+           :type sftp_version: `int`
 
            :returns: :class:`SFTPClient`
 
@@ -4760,7 +4772,8 @@ class SSHClientConnection(SSHConnection):
                                                     encoding=None)
 
         return await start_sftp_client(self, self._loop, reader, writer,
-                                       path_encoding, path_errors)
+                                       path_encoding, path_errors,
+                                       sftp_version)
 
 
 class SSHServerConnection(SSHConnection):
@@ -4829,6 +4842,7 @@ class SSHServerConnection(SSHConnection):
         self._encoding = options.encoding
         self._errors = options.errors
         self._sftp_factory = options.sftp_factory
+        self._sftp_version = options.sftp_version
         self._allow_scp = options.allow_scp
         self._window = options.window
         self._max_pktsize = options.max_pktsize
@@ -5288,10 +5302,12 @@ class SSHServerConnection(SSHConnection):
             if self._process_factory:
                 session = SSHServerProcess(self._process_factory,
                                            self._sftp_factory,
+                                           self._sftp_version,
                                            self._allow_scp)
             else:
                 session = SSHServerStreamSession(self._session_factory,
                                                  self._sftp_factory,
+                                                 self._sftp_version,
                                                  self._allow_scp)
         else:
             result = self._owner.session_requested()
@@ -5307,7 +5323,7 @@ class SSHServerConnection(SSHConnection):
                                                   self._max_pktsize)
 
             if callable(result):
-                session = SSHServerStreamSession(result, None, False)
+                session = SSHServerStreamSession(result)
             else:
                 session = cast(SSHServerSession, result)
 
@@ -6115,6 +6131,7 @@ class SSHConnectionOptions(Options):
     """SSH connection options"""
 
     config: SSHConfig
+    waiter: Optional[asyncio.Future]
     protocol_factory: _ProtocolFactory
     version: bytes
     host: str
@@ -6403,13 +6420,15 @@ class SSHClientConnectionOptions(SSHConnectionOptions):
            logged in user will be used.
        :param client_keys: (optional)
            A list of keys which will be used to authenticate this client
-           via public key authentication. If no client keys are specified,
-           an attempt will be made to get them from an ssh-agent process
-           and/or load them from the files :file:`.ssh/id_ed25519_sk`,
-           :file:`.ssh/id_ecdsa_sk`, :file:`.ssh/id_ed448`,
-           :file:`.ssh/id_ed25519`, :file:`.ssh/id_ecdsa`,
-           :file:`.ssh/id_rsa`, and :file:`.ssh/id_dsa` in the user's
-           home directory, with optional certificates loaded from the files
+           via public key authentication. These keys will be used after
+           trying keys from a PKCS11 provider or an ssh-agent, if either
+           of those are configured. If no client keys are specified,
+           an attempt will be made to load them from the files
+           :file:`.ssh/id_ed25519_sk`, :file:`.ssh/id_ecdsa_sk`,
+           :file:`.ssh/id_ed448`, :file:`.ssh/id_ed25519`,
+           :file:`.ssh/id_ecdsa`, :file:`.ssh/id_rsa`, and
+           :file:`.ssh/id_dsa` in the user's home directory, with
+           optional certificates loaded from the files
            :file:`.ssh/id_ed25519_sk-cert.pub`,
            :file:`.ssh/id_ecdsa_sk-cert.pub`, :file:`.ssh/id_ed448-cert.pub`,
            :file:`.ssh/id_ed25519-cert.pub`, :file:`.ssh/id_ecdsa-cert.pub`,
@@ -6482,9 +6501,8 @@ class SSHClientConnectionOptions(SSHConnectionOptions):
            public key authentication, or the :class:`SSHServerConnection`
            to use to forward ssh-agent requests over. If this is not
            specified and the environment variable `SSH_AUTH_SOCK` is
-           set, its value will be used as the path. If `client_keys`
-           is specified or this argument is explicitly set to `None`,
-           an ssh-agent will not be used.
+           set, its value will be used as the path. If this argument is
+           explicitly set to `None`, an ssh-agent will not be used.
        :param agent_identities: (optional)
            A list of identities used to restrict which SSH agent keys may
            be used. These may be specified as byte strings in binary SSH
@@ -7208,6 +7226,9 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
            client, or `True` to use the base :class:`SFTPServer` class
            to handle SFTP requests. If not specified, SFTP sessions are
            rejected by default.
+       :param sftp_version: (optional)
+           The maximum version of the SFTP protocol to support, currently
+           either 3 or 4, defaulting to 3.
        :param allow_scp: (optional)
            Whether or not to allow incoming scp requests to be accepted.
            This option can only be used in conjunction with `sftp_factory`.
@@ -7325,6 +7346,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
        :type encoding: `str`
        :type errors: `str`
        :type sftp_factory: `callable`
+       :type sftp_version: `int`
        :type allow_scp: `bool`
        :type window: `int`
        :type max_pktsize: `int`
@@ -7368,6 +7390,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
     encoding: Optional[str]
     errors: str
     sftp_factory: Optional[SFTPServerFactory]
+    sftp_version: int
     allow_scp: bool
     window: int
     max_pktsize: int
@@ -7420,6 +7443,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
                 session_factory: Optional[SSHServerSessionFactory] = None,
                 encoding: Optional[str] = 'utf-8', errors: str = 'strict',
                 sftp_factory: Optional[SFTPServerFactory] = None,
+                sftp_version: int = MIN_SFTP_VERSION,
                 allow_scp: bool = False, window: int = _DEFAULT_WINDOW,
                 max_pktsize: int = _DEFAULT_MAX_PKTSIZE) -> None:
         """Prepare server connection configuration options"""
@@ -7533,6 +7557,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
         self.encoding = encoding
         self.errors = errors
         self.sftp_factory = SFTPServer if sftp_factory is True else sftp_factory
+        self.sftp_version = sftp_version
         self.allow_scp = allow_scp
         self.window = window
         self.max_pktsize = max_pktsize
