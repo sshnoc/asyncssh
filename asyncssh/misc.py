@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2013-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -258,7 +258,7 @@ def parse_time_interval(value: str) -> float:
     return _parse_units(value, _time_units, 'time interval')
 
 
-_ACM = TypeVar('_ACM', bound=AsyncContextManager)
+_ACM = TypeVar('_ACM', bound=AsyncContextManager, covariant=True)
 
 class _ACMWrapper(Generic[_ACM]):
     """Async context manager wrapper"""

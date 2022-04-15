@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2020-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -24,18 +24,28 @@ import os
 import re
 import shlex
 import socket
+import subprocess
 
 from hashlib import sha1
 from pathlib import Path, PurePath
+from subprocess import DEVNULL
 from typing import Callable, Dict, List, NoReturn, Optional, Sequence
 from typing import Set, Tuple, Union, cast
 
 from .constants import DEFAULT_PORT
+from .logging import logger
 from .misc import DefTuple, FilePath, ip_address
 from .pattern import HostPatternList, WildcardPatternList
 
 
 ConfigPaths = Union[None, FilePath, Sequence[FilePath]]
+
+
+def _exec(cmd: str) -> bool:
+    """Execute a command and return if exit status is 0"""
+
+    return subprocess.run(cmd, check=False, shell=True, stdin=DEVNULL,
+                          stdout=DEVNULL, stderr=DEVNULL).returncode == 0
 
 
 class ConfigParseError(ValueError):
@@ -56,11 +66,14 @@ class SSHConfig:
         else:
             self._last_options = {}
 
+        self._default_path = Path('~', '.ssh').expanduser()
         self._path = Path()
         self._line_no = 0
         self._matching = True
         self._options = self._last_options.copy()
         self._tokens: Dict[str, str] = {}
+
+        self.loaded = False
 
     def _error(self, reason: str, *args: object) -> NoReturn:
         """Raise a configuration parsing error"""
@@ -91,14 +104,20 @@ class SSHConfig:
                 continue
 
             try:
-                result.extend([value[last_idx:idx],
-                               self._tokens[value[idx+1]]])
+                token = value[idx+1]
+                result.extend([value[last_idx:idx], self._tokens[token]])
                 last_idx = idx + 2
             except IndexError:
                 raise ConfigParseError('Invalid token substitution') from None
             except KeyError:
-                raise ConfigParseError('Invalid token substitution: %s' %
-                                       value[idx+1]) from None
+                if token == 'd':
+                    raise ConfigParseError('Home directory is '
+                                           'not available') from None
+                elif token == 'i':
+                    raise ConfigParseError('User id not available') from None
+                else:
+                    raise ConfigParseError('Invalid token substitution: %s' %
+                                           value[idx+1]) from None
 
         result.append(value[last_idx:])
         return ''.join(result)
@@ -108,6 +127,8 @@ class SSHConfig:
 
         # pylint: disable=unused-argument
 
+        old_path = self._path
+
         for pattern in args:
             path = Path(pattern).expanduser()
 
@@ -115,11 +136,17 @@ class SSHConfig:
                 pattern = str(Path(*path.parts[1:]))
                 path = Path(path.anchor)
             else:
-                path = Path(self._path).parent
+                path = self._default_path
 
-            for path in path.glob(pattern):
+            paths = list(path.glob(pattern))
+
+            if not paths:
+                logger.debug1('Config pattern "%s" matched no files', pattern)
+
+            for path in paths:
                 self.parse(path)
 
+        self._path = old_path
         args.clear()
 
     def _match(self, option: str, args: List[str]) -> None:
@@ -136,11 +163,13 @@ class SSHConfig:
 
             match_val = self._match_val(match)
 
-            if match_val is None:
+            if match != 'exec' and match_val is None:
                 self._error('Invalid match condition')
 
             try:
-                if match in ('address', 'localaddress'):
+                if match == 'exec':
+                    self._matching = _exec(args.pop(0))
+                elif match in ('address', 'localaddress'):
                     host_pat = HostPatternList(args.pop(0))
                     ip = ip_address(cast(str, match_val)) \
                         if match_val else None
@@ -272,6 +301,8 @@ class SSHConfig:
         self._matching = True
         self._tokens = {'%': '%'}
 
+        logger.debug1('Reading config from "%s"', path)
+
         with open(path) as file:
             for line in file:
                 self._line_no += 1
@@ -354,6 +385,8 @@ class SSHConfig:
 
             for path in paths:
                 config.parse(Path(path))
+
+            config.loaded = True
 
         return config
 
@@ -457,12 +490,12 @@ class SSHClientConfig(SSHConfig):
         host = cast(str, self._options.get('Hostname', self._orig_host))
         port = str(self._options.get('Port', DEFAULT_PORT))
         user = cast(str, self._options.get('User') or self._local_user)
+        home = os.path.expanduser('~')
 
         conn_info = ''.join((local_host, host, port, user))
         conn_hash = sha1(conn_info.encode('utf-8')).hexdigest()
 
         self._tokens.update({'C': conn_hash,
-                             'd': str(Path.home()),
                              'h': host,
                              'L': short_local_host,
                              'l': local_host,
@@ -471,7 +504,10 @@ class SSHClientConfig(SSHConfig):
                              'r': user,
                              'u': self._local_user})
 
-        if hasattr(os, 'getuid'): # pragma: no branch
+        if home != '~':
+            self._tokens['d'] = home
+
+        if hasattr(os, 'getuid'):
             self._tokens['i'] = str(os.getuid())
 
     _handlers = {option.lower(): (option, handler) for option, handler in (

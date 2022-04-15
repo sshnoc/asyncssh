@@ -1,5 +1,9 @@
 [run]
 branch = True
+relative_files = True
+source =
+    asyncssh
+    tests
 
 [report]
 exclude_lines =
@@ -9,5 +13,3 @@ exclude_lines =
 partial_branches =
     pragma: no branch
     for .*
-omit =
-    .tox/*

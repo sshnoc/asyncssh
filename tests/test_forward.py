@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -319,7 +319,7 @@ class _TestTCPForwarding(_CheckForwarding):
         """Test failed connection on a tunneled SSH connection via string"""
 
         with self.assertRaises(asyncssh.ChannelOpenError):
-            await asyncssh.connect('0.0.0.1',
+            await asyncssh.connect('\xff',
                                    tunnel='%s:%d' % (self._server_addr,
                                                      self._server_port))
 
@@ -426,7 +426,7 @@ class _TestTCPForwarding(_CheckForwarding):
         """Test open failure on a tunneled SSH listener via string"""
 
         with self.assertRaises(asyncssh.ChannelListenError):
-            await asyncssh.listen('0.0.0.1',
+            await asyncssh.listen('\xff',
                                   tunnel='%s:%d' % (self._server_addr,
                                                     self._server_port),
                                   server_factory=Server,
@@ -602,7 +602,6 @@ class _TestTCPForwarding(_CheckForwarding):
                 writer.close()
                 await maybe_wait_closed(writer)
 
-
     @asynctest
     async def test_forward_local_port_failure(self):
         """Test failure in forwarding a local port"""
@@ -682,8 +681,8 @@ class _TestTCPForwarding(_CheckForwarding):
         server_port = server.sockets[0].getsockname()[1]
 
         async with self.connect() as conn:
-            async with conn.forward_remote_port('', 0,
-                                                '', server_port) as listener:
+            async with conn.forward_remote_port(
+                    '', 0, '127.0.0.1', server_port) as listener:
                 await self._check_local_connection(listener.get_port())
 
         server.close()
@@ -703,8 +702,8 @@ class _TestTCPForwarding(_CheckForwarding):
         sock.close()
 
         async with self.connect() as conn:
-            async with conn.forward_remote_port('', remote_port,
-                                                '', server_port) as listener:
+            async with conn.forward_remote_port(
+                    '', remote_port, '127.0.0.1', server_port) as listener:
                 await self._check_local_connection(listener.get_port())
 
         server.close()

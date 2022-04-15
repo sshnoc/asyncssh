@@ -1443,9 +1443,9 @@ class SSHServerChannel(SSHChannel, Generic[AnyStr]):
 
     def __init__(self, conn: 'SSHServerConnection',
                  loop: asyncio.AbstractEventLoop, allow_pty: bool,
-                 line_editor: bool, line_history: int, max_line_length: int,
-                 encoding: Optional[str], errors: str, window: int,
-                 max_pktsize: int):
+                 line_editor: bool, line_echo: bool, line_history: int,
+                 max_line_length: int, encoding: Optional[str], errors: str,
+                 window: int, max_pktsize: int):
         """Initialize an SSH server channel"""
 
         super().__init__(conn, loop, encoding, errors, window, max_pktsize)
@@ -1455,6 +1455,7 @@ class SSHServerChannel(SSHChannel, Generic[AnyStr]):
 
         self._allow_pty = allow_pty
         self._line_editor = line_editor
+        self._line_echo = line_echo
         self._line_history = line_history
         self._max_line_length = max_line_length
         self._term_type: Optional[str] = None
@@ -1473,6 +1474,7 @@ class SSHServerChannel(SSHChannel, Generic[AnyStr]):
             server_session = cast(SSHServerSession[str], session)
 
             editor_chan = SSHLineEditorChannel(server_chan, server_session,
+                                               self._line_echo,
                                                self._line_history,
                                                self._max_line_length)
             editor_session = SSHLineEditorSession(editor_chan, server_session)
@@ -2002,7 +2004,7 @@ class SSHTCPChannel(SSHForwardChannel, Generic[AnyStr]):
                         orig_port: int) -> SSHTCPSession[AnyStr]:
         """Open a TCP channel"""
 
-        self.set_extra_info(peername=(None, None),
+        self.set_extra_info(peername=('', 0),
                             local_peername=(orig_host, orig_port),
                             remote_peername=(host, port))
 
@@ -2032,7 +2034,7 @@ class SSHTCPChannel(SSHForwardChannel, Generic[AnyStr]):
                                orig_host: str, orig_port: int) -> None:
         """Set local and remote peer names for inbound connections"""
 
-        self.set_extra_info(peername=(None, None),
+        self.set_extra_info(peername=('', 0),
                             local_peername=(dest_host, dest_port),
                             remote_peername=(orig_host, orig_port))
 
@@ -2084,7 +2086,7 @@ class SSHX11Channel(SSHForwardChannel[bytes]):
         """Open an SSH X11 channel"""
 
         self.set_extra_info(local_peername=(orig_host, orig_port),
-                            remote_peername=(None, None))
+                            remote_peername=('', 0))
 
         return cast(SSHTCPSession[bytes],
                     await self._open_forward(session_factory, b'x11',
@@ -2094,7 +2096,7 @@ class SSHX11Channel(SSHForwardChannel[bytes]):
     def set_inbound_peer_names(self, orig_host: str, orig_port: int) -> None:
         """Set local and remote peer name for inbound connections"""
 
-        self.set_extra_info(local_peername=(None, None),
+        self.set_extra_info(local_peername=('', 0),
                             remote_peername=(orig_host, orig_port))
 
 

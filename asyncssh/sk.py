@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2019-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -167,7 +167,7 @@ def sk_enroll(alg: int, application: bytes, user: str,
     try:
         return _ctap2_enroll(dev, alg, application, user, pin, resident)
     except CtapError as exc:
-        if exc.code == CtapError.ERR.PIN_REQUIRED:
+        if exc.code == CtapError.ERR.PUAT_REQUIRED:
             raise ValueError('PIN required') from None
         elif exc.code == CtapError.ERR.PIN_INVALID:
             raise ValueError('Invalid PIN') from None

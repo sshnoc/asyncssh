@@ -160,6 +160,11 @@ get_server_host_key
 
 .. autofunction:: get_server_host_key
 
+get_server_auth_methods
+-----------------------
+
+.. autofunction:: get_server_auth_methods
+
 scp
 ---
 
@@ -1726,10 +1731,20 @@ The following OpenSSH client config options are currently supported:
 For the "Match" conditional, the following criteria are currently supported:
 
   | All
+  | Exec
   | Host
   | LocalUser
   | OriginalHost
   | User
+
+  .. warning:: When instantiating :class:`SSHClientConnectionOptions`
+               objects manually within an asyncio task, you may block
+               the event loop if the options refer to a config file with
+               "Match Exec" directives which don't return immediate
+               results. In such cases, the asyncio `run_in_executor()`
+               function should be used. This is taken care of automatically
+               when options objects are created by AsyncSSH APIs such as
+               :func:`connect` and :func:`listen`.
 
 The following client config token expansions are currently supported:
 
@@ -1798,11 +1813,21 @@ The following OpenSSH server config options are currently supported:
 For the "Match" conditional, the following criteria are currently supported:
 
   | All
+  | Exec
   | Address
   | Host
   | LocalAddress
   | LocalPort
   | User
+
+  .. warning:: When instantiating :class:`SSHServerConnectionOptions`
+               objects manually within an asyncio task, you may block
+               the event loop if the options refer to a config file with
+               "Match Exec" directives which don't return immediate
+               results. In such cases, the asyncio `run_in_executor()`
+               function should be used. This is taken care of automatically
+               when options objects are created by AsyncSSH APIs such as
+               :func:`connect` and :func:`listen`.
 
 The following server config token expansions are currently supported:
 
@@ -2361,6 +2386,8 @@ currently supported by AsyncSSH:
   | ecdsa-sha2-nistp384-cert-v01\@openssh.com
   | ecdsa-sha2-nistp256-cert-v01\@openssh.com
   | ecdsa-sha2-1.3.132.0.10-cert-v01\@openssh.com
+  | rsa-sha2-256-cert-v01\@openssh.com
+  | rsa-sha2-512-cert-v01\@openssh.com
   | ssh-rsa-cert-v01\@openssh.com
   | sk-ssh-ed25519\@openssh.com
   | sk-ecdsa-sha2-nistp256\@openssh.com

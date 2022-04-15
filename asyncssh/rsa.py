@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2021 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2013-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -265,8 +265,9 @@ class RSAKey(SSHKey):
 
 register_public_key_alg(b'ssh-rsa', RSAKey, True)
 
-register_certificate_alg(1, b'ssh-rsa', b'ssh-rsa-cert-v01@openssh.com',
-                         RSAKey, SSHOpenSSHCertificateV01, True)
+for _alg  in (b'rsa-sha2-256', b'rsa-sha2-512', b'ssh-rsa'):
+    register_certificate_alg(1, _alg, _alg + b'-cert-v01@openssh.com',
+                             RSAKey, SSHOpenSSHCertificateV01, True)
 
-for alg in RSAKey.x509_algorithms:
-    register_x509_certificate_alg(alg, True)
+for _alg in RSAKey.x509_algorithms:
+    register_x509_certificate_alg(_alg, True)

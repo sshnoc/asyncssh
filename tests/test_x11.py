@@ -1,4 +1,4 @@
-# Copyright (c) 2016-2020 by Ron Frederick <ronf@timeheart.net> and others.
+# Copyright (c) 2016-2022 by Ron Frederick <ronf@timeheart.net> and others.
 #
 # This program and the accompanying materials are made available under
 # the terms of the Eclipse Public License v2.0 which accompanies this
@@ -279,12 +279,12 @@ class _TestX11(ServerTestCase):
                 XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
-                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET, '0.0.0.2'),
-                b'0', XAUTH_PROTO_COOKIE, auth_data)))
+                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET,
+                '127.0.0.2'), b'0', XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
-                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET, '0.0.0.1'),
-                b'0', XAUTH_PROTO_COOKIE, auth_data)))
+                XAUTH_FAMILY_IPV4, socket.inet_pton(socket.AF_INET,
+                '127.0.0.1'), b'0', XAUTH_PROTO_COOKIE, auth_data)))
 
             auth_file.write(bytes(SSHXAuthorityEntry(
                 XAUTH_FAMILY_IPV6, socket.inet_pton(socket.AF_INET6, '::2'),
@@ -423,7 +423,7 @@ class _TestX11(ServerTestCase):
     async def test_ipv4_address(self):
         """Test matching against an IPv4 address"""
 
-        await self._check_x11(x11_display='0.0.0.1:0')
+        await self._check_x11(x11_display='127.0.0.1:0')
 
     @asynctest
     async def test_ipv6_address(self):

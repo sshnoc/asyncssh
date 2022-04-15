@@ -4168,7 +4168,7 @@ class SFTPClient:
                    attrs: SFTPAttrs = SFTPAttrs(),
                    encoding: Optional[str] = 'utf-8', errors: str = 'strict',
                    block_size: int = SFTP_BLOCK_SIZE,
-                   max_requests: int = _MAX_SFTP_REQUESTS) -> SFTPFileProtocol:
+                   max_requests: int = _MAX_SFTP_REQUESTS) -> SFTPClientFile:
         """Open a remote file
 
            This method opens a remote file and returns an
@@ -4300,8 +4300,7 @@ class SFTPClient:
                      attrs: SFTPAttrs = SFTPAttrs(),
                      encoding: Optional[str] = 'utf-8', errors: str = 'strict',
                      block_size: int = SFTP_BLOCK_SIZE,
-                     max_requests: int = _MAX_SFTP_REQUESTS) -> \
-            SFTPFileProtocol:
+                     max_requests: int = _MAX_SFTP_REQUESTS) -> SFTPClientFile:
         """Open a remote file using SFTP v5/v6 flags
 
            This method is very similar to :meth:`open`, but the pflags_or_mode
@@ -7104,13 +7103,19 @@ class LocalFile:
     def __init__(self, file: _SFTPFileObj):
         self._file = file
 
-    async def __aenter__(self) -> 'SFTPFileProtocol':
+    async def __aenter__(self) -> 'LocalFile': # pragma: no cover
         """Allow LocalFile to be used as an async context manager"""
+
+        return self
 
     async def __aexit__(self, _exc_type: Optional[Type[BaseException]],
                         _exc_value: Optional[BaseException],
-                        _traceback: Optional[TracebackType]) -> bool:
+                        _traceback: Optional[TracebackType]) -> \
+            bool: # pragma: no cover
         """Wait for file close when used as an async context manager"""
+
+        await self.close()
+        return False
 
     async def read(self, size: int, offset: int) -> bytes:
         """Read data from the local file"""
@@ -7213,7 +7218,7 @@ class LocalFS:
         os.symlink(_to_local_path(oldpath), _to_local_path(newpath))
 
     @async_context_manager
-    async def open(self, path: bytes, mode: str) -> SFTPFileProtocol:
+    async def open(self, path: bytes, mode: str) -> LocalFile:
         """Open a local file"""
 
         # pylint: disable=unused-argument
@@ -7241,6 +7246,7 @@ class SFTPServerFile:
             bool: # pragma: no cover
         """Wait for client close when used as an async context manager"""
 
+        await self.close()
         return False
 
     async def read(self, size: int, offset: int) -> bytes:
@@ -7358,7 +7364,7 @@ class SFTPServerFS:
             await result
 
     @async_context_manager
-    async def open(self, path: bytes, mode: str) -> SFTPFileProtocol:
+    async def open(self, path: bytes, mode: str) -> SFTPServerFile:
         """Open a file"""
 
         pflags, _ = _mode_to_pflags(mode)

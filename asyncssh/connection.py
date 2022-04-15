@@ -21,6 +21,7 @@
 """SSH connection handlers"""
 
 import asyncio
+import functools
 import getpass
 import inspect
 import io
@@ -44,8 +45,8 @@ from .agent import SSHAgentClient, SSHAgentListener
 
 from .auth import Auth, ClientAuth, KbdIntChallenge, KbdIntPrompts
 from .auth import KbdIntResponse, PasswordChangeResponse
-from .auth import get_client_auth_methods, lookup_client_auth
-from .auth import get_server_auth_methods, lookup_server_auth
+from .auth import get_supported_client_auth_methods, lookup_client_auth
+from .auth import get_supported_server_auth_methods, lookup_server_auth
 
 from .auth_keys import SSHAuthorizedKeys, read_authorized_keys
 
@@ -498,6 +499,14 @@ async def _listen(options: 'SSHConnectionOptions',
             reuse_port=reuse_port)
 
     return SSHAcceptor(server, options)
+
+
+async def _run_in_executor(loop: asyncio.AbstractEventLoop, func: Callable,
+                           *args: object, **kwargs: object) -> object:
+    """Run a potentially blocking call in an executor"""
+
+    return await loop.run_in_executor(
+        None, functools.partial(func, *args, **kwargs))
 
 
 def _validate_version(version: DefTuple[BytesOrStr]) -> bytes:
@@ -1844,7 +1853,8 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
     def send_userauth_failure(self, partial_success: bool) -> None:
         """Send a user authentication failure response"""
 
-        methods = get_server_auth_methods(cast(SSHServerConnection, self))
+        methods = get_supported_server_auth_methods(
+            cast(SSHServerConnection, self))
 
         self.logger.debug2('Remaining auth methods: %s', methods or 'None')
 
@@ -2265,6 +2275,13 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         self.logger.debug2('Remaining auth methods: %s',
                            auth_methods or 'None')
 
+        if self._wait == 'auth_methods' and self._waiter and \
+                not self._waiter.cancelled():
+            self._waiter.set_result(None)
+            self._auth_methods = list(auth_methods)
+            self._wait = None
+            return
+
         if self._preferred_auth:
             self.logger.debug2('Preferred auth methods: %s',
                                self._preferred_auth or 'None')
@@ -2303,6 +2320,13 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
                 raise PermissionDenied('Trivial auth disabled')
 
             self.logger.info('Auth for user %s succeeded', self._username)
+
+            if self._wait == 'auth_methods' and self._waiter and \
+                    not self._waiter.cancelled():
+                self._waiter.set_result(None)
+                self._auth_methods = [b'none']
+                self._wait = None
+                return
 
             auth.auth_succeeded()
             auth.cancel()
@@ -2402,6 +2426,11 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         send_window = packet.get_uint32()
         send_pktsize = packet.get_uint32()
 
+        # Work around an off-by-one error in dropbear introduced in
+        # https://github.com/mkj/dropbear/commit/49263b5
+        if b'dropbear' in self._client_version and self._compressor:
+            send_pktsize -= 1
+
         try:
             chantype = chantype_bytes.decode('ascii')
         except UnicodeDecodeError:
@@ -2433,6 +2462,11 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
         send_chan = packet.get_uint32()
         send_window = packet.get_uint32()
         send_pktsize = packet.get_uint32()
+
+        # Work around an off-by-one error in dropbear introduced in
+        # https://github.com/mkj/dropbear/commit/49263b5
+        if b'dropbear' in self._server_version and self._compressor:
+            send_pktsize -= 1
 
         chan = self._channels.get(recv_chan)
         if chan:
@@ -2708,7 +2742,7 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
                The receive window size for this session
            :param max_pktsize: (optional)
                The maximum packet size for this session
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -2743,7 +2777,7 @@ class SSHConnection(SSHPacketHandler, asyncio.Protocol):
                The receive window size for this session
            :param max_pktsize: (optional)
                The maximum packet size for this session
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -3033,7 +3067,7 @@ class SSHClientConnection(SSHConnection):
             self._preferred_auth = [method.encode('ascii') for method in
                                     options.preferred_auth]
         else:
-            self._preferred_auth = get_client_auth_methods()
+            self._preferred_auth = get_supported_client_auth_methods()
 
         self._disable_trivial_auth = options.disable_trivial_auth
 
@@ -3211,6 +3245,18 @@ class SSHClientConnection(SSHConnection):
         """
 
         return self._server_host_key
+
+    def get_server_auth_methods(self) -> Sequence[str]:
+        """Return the server host key used in the key exchange
+
+           This method returns the auth methods available to authenticate
+           to the server.
+
+           :returns: `list` of `str`
+
+        """
+
+        return [method.decode('ascii') for method in self._auth_methods]
 
     def try_next_auth(self) -> None:
         """Attempt client authentication using the next compatible method"""
@@ -3743,7 +3789,7 @@ class SSHClientConnection(SSHConnection):
            :type x11_display: `str`
            :type x11_auth_path: `str`
            :type x11_single_connection: `bool`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -4114,7 +4160,7 @@ class SSHClientConnection(SSHConnection):
            :type remote_port: `int`
            :type orig_host: `str`
            :type orig_port: `int`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -4202,7 +4248,7 @@ class SSHClientConnection(SSHConnection):
            :type session_factory: `callable`
            :type listen_host: `str`
            :type listen_port: `int`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -4336,7 +4382,7 @@ class SSHClientConnection(SSHConnection):
                The maximum packet size for this session
            :type session_factory: `callable`
            :type remote_path: `str`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -4418,7 +4464,7 @@ class SSHClientConnection(SSHConnection):
                The maximum packet size for this session
            :type session_factory: `callable`
            :type listen_path: `str`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -4757,7 +4803,7 @@ class SSHClientConnection(SSHConnection):
                either 3 or 4, defaulting to 3.
            :type env: `dict` with `str` keys and values
            :type send_env: `list` of `str`
-           :type path_encoding: `str`
+           :type path_encoding: `str` or `None`
            :type path_errors: `str`
            :type sftp_version: `int`
 
@@ -4831,6 +4877,7 @@ class SSHServerConnection(SSHConnection):
         self._authorized_client_keys = options.authorized_client_keys
         self._allow_pty = options.allow_pty
         self._line_editor = options.line_editor
+        self._line_echo = options.line_echo
         self._line_history = options.line_history
         self._max_line_length = options.max_line_length
         self._rdns_lookup = options.rdns_lookup
@@ -4894,11 +4941,11 @@ class SSHServerConnection(SSHConnection):
             self._peer_host, _ = await self._loop.getnameinfo(
                 (self._peer_addr, self._peer_port), socket.NI_NUMERICSERV)
 
-        options = SSHServerConnectionOptions(
-            options=self._options, reload=True,
-            accept_addr=self._local_addr, accept_port=self._local_port,
-            username=self._username, client_host=self._peer_host,
-            client_addr=self._peer_addr)
+        options = cast(SSHServerConnectionOptions, await _run_in_executor(
+            self._loop, SSHServerConnectionOptions, options=self._options,
+            reload=True, accept_addr=self._local_addr,
+            accept_port=self._local_port, username=self._username,
+            client_host=self._peer_host, client_addr=self._peer_addr))
 
         self._options = options
 
@@ -5859,11 +5906,9 @@ class SSHServerConnection(SSHConnection):
         else:
             return True
 
-    def create_server_channel(self, encoding: Optional[str] = 'utf-8',
-                              errors: str = 'strict',
-                              window: int = _DEFAULT_WINDOW,
-                              max_pktsize: int = _DEFAULT_MAX_PKTSIZE) -> \
-            SSHServerChannel:
+    def create_server_channel(self, encoding: Optional[str] = '',
+                              errors: str = '', window: int = 0,
+                              max_pktsize: int = 0) -> SSHServerChannel:
         """Create an SSH server channel for a new SSH session
 
            This method can be called by :meth:`session_requested()
@@ -5883,7 +5928,7 @@ class SSHServerConnection(SSHConnection):
                The receive window size for this session
            :param max_pktsize: (optional)
                The maximum packet size for this session
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -5893,9 +5938,12 @@ class SSHServerConnection(SSHConnection):
         """
 
         return SSHServerChannel(self, self._loop, self._allow_pty,
-                                self._line_editor, self._line_history,
-                                self._max_line_length, encoding, errors,
-                                window, max_pktsize)
+                                self._line_editor, self._line_echo,
+                                self._line_history, self._max_line_length,
+                                self._encoding if encoding == '' else encoding,
+                                self._errors if errors == '' else errors,
+                                window or self._window,
+                                max_pktsize or self._max_pktsize)
 
     async def create_connection(
             self, session_factory: SSHTCPSessionFactory[AnyStr],
@@ -5949,7 +5997,7 @@ class SSHServerConnection(SSHConnection):
            :type remote_port: `int`
            :type orig_host: `str`
            :type orig_port: `int`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -6035,7 +6083,7 @@ class SSHServerConnection(SSHConnection):
                The maximum packet size for this session
            :type session_factory: `callable`
            :type remote_path: `str`
-           :type encoding: `str`
+           :type encoding: `str` or `None`
            :type errors: `str`
            :type window: `int`
            :type max_pktsize: `int`
@@ -6735,7 +6783,7 @@ class SSHClientConnectionOptions(SSHConnectionOptions):
        :type x11_display: `str`
        :type x11_auth_path: `str`
        :type x11_single_connection: `bool`
-       :type encoding: `str`
+       :type encoding: `str` or `None`
        :type errors: `str`
        :type window: `int`
        :type max_pktsize: `int`
@@ -6790,7 +6838,7 @@ class SSHClientConnectionOptions(SSHConnectionOptions):
 
     # pylint: disable=arguments-differ
     def prepare(self, last_config: Optional[SSHConfig] = None, # type: ignore
-                config: DefTuple[ConfigPaths] = (), reload: bool = False,
+                config: DefTuple[ConfigPaths] = None, reload: bool = False,
                 client_factory: Optional[_ClientFactory] = None,
                 client_version: _VersionArg = (), host: str = '',
                 port: DefTuple[int] = (), tunnel: object = (),
@@ -6858,7 +6906,7 @@ class SSHClientConnectionOptions(SSHConnectionOptions):
                              'LOGNAME, USER, LNAME, or USERNAME in '
                              'the environment') from None
 
-        if config == () and not last_config:
+        if config == () and (not last_config or not last_config.loaded):
             default_config = Path('~', '.ssh', 'config').expanduser()
             config = [default_config] if os.access(default_config,
                                                    os.R_OK) else []
@@ -7175,6 +7223,12 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
        :param line_editor: (optional)
            Whether or not to enable input line editing on sessions which
            have a pseudo-tty allocated, defaulting to `True`
+       :param line_echo: (bool)
+           Whether or not to echo completed input lines when they are
+           entered, rather than waiting for the application to read and
+           echo them, defaulting to `True`. Setting this to `False`
+           and performing the echo in the application can better synchronize
+           input and output, especially when there are input prompts.
        :param line_history: (int)
            The number of lines of input line history to store in the
            line editor when it is enabled, defaulting to 1000
@@ -7335,6 +7389,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
        :type gss_auth: `bool`
        :type allow_pty: `bool`
        :type line_editor: `bool`
+       :type line_echo: `bool`
        :type line_history: `int`
        :type max_line_length: `int`
        :type rdns_lookup: `bool`
@@ -7343,7 +7398,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
        :type agent_forwarding: `bool`
        :type process_factory: `callable`
        :type session_factory: `callable`
-       :type encoding: `str`
+       :type encoding: `str` or `None`
        :type errors: `str`
        :type sftp_factory: `callable`
        :type sftp_version: `int`
@@ -7379,6 +7434,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
     gss_auth: bool
     allow_pty: bool
     line_editor: bool
+    line_echo: bool
     line_history: int
     max_line_length: int
     rdns_lookup: bool
@@ -7397,7 +7453,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
 
     # pylint: disable=arguments-differ
     def prepare(self, last_config: Optional[SSHConfig] = None, # type: ignore
-                config: DefTuple[ConfigPaths] = (), reload: bool = False,
+                config: DefTuple[ConfigPaths] = None, reload: bool = False,
                 accept_addr: str = '', accept_port: int = 0,
                 username: str = '', client_host: str = '',
                 client_addr: str = '',
@@ -7433,6 +7489,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
                 gss_auth: DefTuple[bool] = (),
                 allow_pty: DefTuple[bool] = (),
                 line_editor: bool = True,
+                line_echo: bool = True,
                 line_history: int = _DEFAULT_LINE_HISTORY,
                 max_line_length: int = _DEFAULT_MAX_LINE_LENGTH,
                 rdns_lookup: DefTuple[bool] = (),
@@ -7539,6 +7596,7 @@ class SSHServerConnectionOptions(SSHConnectionOptions):
             config.get('PermitTTY', True))
 
         self.line_editor = line_editor
+        self.line_echo = line_echo
         self.line_history = line_history
         self.max_line_length = max_line_length
 
@@ -7621,10 +7679,13 @@ async def connect(host: str, port: DefTuple[int] = (), *,
            Paths to OpenSSH client configuration files to load. This
            configuration will be used as a fallback to override the
            defaults for settings which are not explcitly specified using
-           AsyncSSH's configuration options. If no paths are specified,
-           an attempt will be made to load the configuration from the file
-           :file:`.ssh/config`. If this argument is explicitly set to
-           `None`, no OpenSSH configuration files will be loaded. See
+           AsyncSSH's configuration options. If no paths are specified and
+           no config paths were set when constructing the `options`
+           argument (if any), an attempt will be made to load the
+           configuration from the file :file:`.ssh/config`. If this
+           argument is explicitly set to `None`, no new configuration
+           files will be loaded, but any configuration loaded when
+           constructing the `options` argument will still apply. See
            :ref:`SupportedClientConfigOptions` for details on what
            configuration options are currently supported.
        :param options: (optional)
@@ -7651,10 +7712,10 @@ async def connect(host: str, port: DefTuple[int] = (), *,
 
     loop = asyncio.get_event_loop()
 
-    new_options = SSHClientConnectionOptions(options, config=config, host=host,
-                                             port=port, tunnel=tunnel,
-                                             family=family,
-                                             local_addr=local_addr, **kwargs)
+    new_options = cast(SSHClientConnectionOptions, await _run_in_executor(
+        loop, SSHClientConnectionOptions, options, config=config,
+        host=host, port=port, tunnel=tunnel, family=family,
+        local_addr=local_addr, **kwargs))
 
     return await asyncio.wait_for(
         _connect(new_options, loop, flags, conn_factory,
@@ -7735,10 +7796,10 @@ async def connect_reverse(
 
     loop = asyncio.get_event_loop()
 
-    new_options = SSHServerConnectionOptions(options, config=config, host=host,
-                                             port=port, tunnel=tunnel,
-                                             family=family,
-                                             local_addr=local_addr, **kwargs)
+    new_options = cast(SSHServerConnectionOptions, await _run_in_executor(
+        loop, SSHServerConnectionOptions, options, config=config,
+        host=host, port=port, tunnel=tunnel, family=family,
+        local_addr=local_addr, **kwargs))
 
     return await asyncio.wait_for(
         _connect(new_options, loop, flags, conn_factory,
@@ -7837,9 +7898,9 @@ async def listen(host: str = '', port: DefTuple[int] = (), *,
 
     loop = asyncio.get_event_loop()
 
-    new_options = SSHServerConnectionOptions(options, config=config, host=host,
-                                             port=port, tunnel=tunnel,
-                                             family=family, **kwargs)
+    new_options = cast(SSHServerConnectionOptions, await _run_in_executor(
+        loop, SSHServerConnectionOptions, options, config=config,
+        host=host, port=port, tunnel=tunnel, family=family, **kwargs))
 
     # pylint: disable=attribute-defined-outside-init
     new_options.proxy_command = None
@@ -7922,10 +7983,13 @@ async def listen_reverse(host: str = '', port: DefTuple[int] = (), *,
            Paths to OpenSSH client configuration files to load. This
            configuration will be used as a fallback to override the
            defaults for settings which are not explcitly specified using
-           AsyncSSH's configuration options. If no paths are specified,
-           an attempt will be made to load the configuration from the file
-           :file:`.ssh/config`. If this argument is explicitly set to
-           `None`, no OpenSSH configuration files will be loaded. See
+           AsyncSSH's configuration options. If no paths are specified and
+           no config paths were set when constructing the `options`
+           argument (if any), an attempt will be made to load the
+           configuration from the file :file:`.ssh/config`. If this
+           argument is explicitly set to `None`, no new configuration
+           files will be loaded, but any configuration loaded when
+           constructing the `options` argument will still apply. See
            :ref:`SupportedClientConfigOptions` for details on what
            configuration options are currently supported.
        :param options: (optional)
@@ -7954,9 +8018,9 @@ async def listen_reverse(host: str = '', port: DefTuple[int] = (), *,
 
     loop = asyncio.get_event_loop()
 
-    new_options = SSHClientConnectionOptions(options, config=config, host=host,
-                                             port=port, tunnel=tunnel,
-                                             family=family, **kwargs)
+    new_options = cast(SSHClientConnectionOptions, await _run_in_executor(
+        loop, SSHClientConnectionOptions, options, config=config,
+        host=host, port=port, tunnel=tunnel, family=family, **kwargs))
 
     # pylint: disable=attribute-defined-outside-init
     new_options.proxy_command = None
@@ -8078,10 +8142,13 @@ async def get_server_host_key(
            Paths to OpenSSH client configuration files to load. This
            configuration will be used as a fallback to override the
            defaults for settings which are not explcitly specified using
-           AsyncSSH's configuration options. If no paths are specified,
-           an attempt will be made to load the configuration from the file
-           :file:`.ssh/config`. If this argument is explicitly set to
-           `None`, no OpenSSH configuration files will be loaded. See
+           AsyncSSH's configuration options. If no paths are specified and
+           no config paths were set when constructing the `options`
+           argument (if any), an attempt will be made to load the
+           configuration from the file :file:`.ssh/config`. If this
+           argument is explicitly set to `None`, no new configuration
+           files will be loaded, but any configuration loaded when
+           constructing the `options` argument will still apply. See
            :ref:`SupportedClientConfigOptions` for details on what
            configuration options are currently supported.
        :param options: (optional)
@@ -8113,13 +8180,13 @@ async def get_server_host_key(
 
     loop = asyncio.get_event_loop()
 
-    new_options = SSHClientConnectionOptions(
-        options, config=config, host=host, port=port, tunnel=tunnel,
-        proxy_command=proxy_command, family=family, local_addr=local_addr,
-        known_hosts=None, server_host_key_algs=server_host_key_algs,
-        x509_trusted_certs=None, x509_trusted_cert_paths=None,
-        x509_purposes='any', gss_host=None, kex_algs=kex_algs,
-        client_version=client_version)
+    new_options = cast(SSHClientConnectionOptions, await _run_in_executor(
+        loop, SSHClientConnectionOptions, options, config=config,
+        host=host, port=port, tunnel=tunnel, proxy_command=proxy_command,
+        family=family, local_addr=local_addr, known_hosts=None,
+        server_host_key_algs=server_host_key_algs, x509_trusted_certs=None,
+        x509_trusted_cert_paths=None, x509_purposes='any', gss_host=None,
+        kex_algs=kex_algs, client_version=client_version))
 
     conn = await asyncio.wait_for(
         _connect(new_options, loop, flags, conn_factory,
@@ -8133,3 +8200,129 @@ async def get_server_host_key(
     await conn.wait_closed()
 
     return server_host_key
+
+
+async def get_server_auth_methods(
+        host: str, port: DefTuple[int] = (), username: DefTuple[str] = (), *,
+        tunnel: DefTuple[_TunnelConnector] = (),
+        proxy_command: DefTuple[str] = (), family: DefTuple[int] = (),
+        flags: int = 0, local_addr: DefTuple[HostPort] = (),
+        client_version: DefTuple[BytesOrStr] = (),
+        kex_algs: _AlgsArg = (), server_host_key_algs: _AlgsArg = (),
+        config: DefTuple[ConfigPaths] = (),
+        options: Optional[SSHClientConnectionOptions] = None) -> Sequence[str]:
+    """Retrieve an SSH server's allowed auth methods
+
+       This is a coroutine which can be run to connect to an SSH server and
+       return the auth methods available to authenticate to it.
+
+           .. note:: The key exchange with the server must complete
+                     successfully before the list of available auth
+                     methods can be returned, so be sure to specify any
+                     arguments needed to complete the key exchange.
+                     Also, auth methods may vary by user, so you may
+                     want to specify the specific user you would like
+                     to get auth methods for.
+
+       :param host:
+           The hostname or address to connect to
+       :param port: (optional)
+           The port number to connect to. If not specified, the default
+           SSH port is used.
+       :param username: (optional)
+           Username to authenticate as on the server. If not specified,
+           the currently logged in user on the local machine will be used.
+       :param tunnel: (optional)
+           An existing SSH client connection that this new connection should
+           be tunneled over. If set, a direct TCP/IP tunnel will be opened
+           over this connection to the requested host and port rather than
+           connecting directly via TCP. A string of the form
+           [user@]host[:port] may also be specified, in which case a
+           connection will first be made to that host and it will then be
+           used as a tunnel.
+       :param proxy_command: (optional)
+           A string or list of strings specifying a command and arguments
+           to run to make a connection to the SSH server. Data will be
+           forwarded to this process over stdin/stdout instead of opening a
+           TCP connection. If specified as a string, standard shell quoting
+           will be applied when splitting the command and its arguments.
+       :param family: (optional)
+           The address family to use when creating the socket. By default,
+           the address family is automatically selected based on the host.
+       :param flags: (optional)
+           The flags to pass to getaddrinfo() when looking up the host address
+       :param local_addr: (optional)
+           The host and port to bind the socket to before connecting
+       :param client_version: (optional)
+           An ASCII string to advertise to the SSH server as the version of
+           this client, defaulting to `'AsyncSSH'` and its version number.
+       :param kex_algs: (optional)
+           A list of allowed key exchange algorithms in the SSH handshake,
+           taken from :ref:`key exchange algorithms <KexAlgs>`
+       :param server_host_key_algs: (optional)
+           A list of server host key algorithms to allow during the SSH
+           handshake, taken from :ref:`server host key algorithms
+           <PublicKeyAlgs>`.
+       :param config: (optional)
+           Paths to OpenSSH client configuration files to load. This
+           configuration will be used as a fallback to override the
+           defaults for settings which are not explcitly specified using
+           AsyncSSH's configuration options. If no paths are specified and
+           no config paths were set when constructing the `options`
+           argument (if any), an attempt will be made to load the
+           configuration from the file :file:`.ssh/config`. If this
+           argument is explicitly set to `None`, no new configuration
+           files will be loaded, but any configuration loaded when
+           constructing the `options` argument will still apply. See
+           :ref:`SupportedClientConfigOptions` for details on what
+           configuration options are currently supported.
+       :param options: (optional)
+           Options to use when establishing the SSH client connection used
+           to retrieve the server host key. These options can be specified
+           either through this parameter or as direct keyword arguments to
+           this function.
+       :type host: `str`
+       :type port: `int`
+       :type tunnel: :class:`SSHClientConnection` or `str`
+       :type proxy_command: `str` or `list` of `str`
+       :type family: `socket.AF_UNSPEC`, `socket.AF_INET`, or `socket.AF_INET6`
+       :type flags: flags to pass to :meth:`getaddrinfo() <socket.getaddrinfo>`
+       :type local_addr: tuple of `str` and `int`
+       :type client_version: `str`
+       :type kex_algs: `str` or `list` of `str`
+       :type server_host_key_algs: `str` or `list` of `str`
+       :type config: `list` of `str`
+       :type options: :class:`SSHClientConnectionOptions`
+
+       :returns: a `list` of `str`
+
+    """
+
+    def conn_factory() -> SSHClientConnection:
+        """Return an SSH client connection factory"""
+
+        return SSHClientConnection(loop, new_options, wait='auth_methods')
+
+    loop = asyncio.get_event_loop()
+
+    new_options = cast(SSHClientConnectionOptions, await _run_in_executor(
+        loop, SSHClientConnectionOptions, options, config=config,
+        host=host, port=port, username=username, tunnel=tunnel,
+        proxy_command=proxy_command, family=family, local_addr=local_addr,
+        known_hosts=None, server_host_key_algs=server_host_key_algs,
+        x509_trusted_certs=None, x509_trusted_cert_paths=None,
+        x509_purposes='any', gss_host=None, kex_algs=kex_algs,
+        client_version=client_version))
+
+    conn = await asyncio.wait_for(
+        _connect(new_options, loop, flags, conn_factory,
+                 'Fetching server auth methods from'),
+        timeout=new_options.connect_timeout)
+
+    server_auth_methods = conn.get_server_auth_methods()
+
+    conn.abort()
+
+    await conn.wait_closed()
+
+    return server_auth_methods
